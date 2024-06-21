@@ -1,11 +1,10 @@
-
 import pyodbc
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from dotenv import load_dotenv
 import os
-
+import locale
 
 # Carregar variáveis de ambiente do arquivo .env
 load_dotenv()
@@ -15,7 +14,7 @@ EMAIL_ADDRESS = os.getenv('EMAIL_ADDRESS')
 EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
 EMAIL_RECIPIENT = os.getenv('EMAIL_RECIPIENT')
 EMAIL_CC = os.getenv('EMAIL_CC')
-DEFAULT_EMAIL = os.getenv('DEFAULT_EMAIL', 'controladoria2@trescoqueiros.com')  # Definir o e-mail padrão aqui
+DEFAULT_EMAIL = os.getenv('DEFAULT_EMAIL')
 
 # Função para enviar e-mail com HTML
 def send_email(to_address, subject, html_body, cc_addresses=None):
@@ -52,44 +51,46 @@ DB_PASSWORD = os.getenv('DB_PASSWORD')
 
 # Query SQL para obter os dados dos pagamentos processados e os e-mails dos fornecedores
 query = '''
-SELECT TL.numeroboleto                            NUMERO_TITULO,
-       ps.codigo                                  ID_PESSOA,
-       PS.NOME                                    FORNECEDOR,
-       RTRIM(T2.DESCRICAO)                        FORMA_PAGAMENTO,
-       TD.DESCRICAO                               TIPO_DOC,
-       TL.emissao                                  DT_EMISSAO,
-       TL.primvcto                                PRIM_DT_VCTO,
-       TL.datavcto                                DT_VCTO,
-       CASE
-         WHEN TL.saldo = 0 THEN TL.ultpgto
-       END                                        DT_PAGTO,
-       Isnull(TL.datafaixa1, TL.datafaixa2)       DT_LIBERACAO,
-       TL.valor                                   VALOR_TITULO,
-       TL.saldo                                   SALDO_PEDENTE,
-       T1.MASCARA                                 MOEDA,
-       TL.valor2                                  VALOR_ORIGINAL,
-       TL.saldo2                                  SALDO_ORIGINAL,
-       --NULLIF ( Ps.email,'')                      EMAIL
-       CASE 
-            WHEN ps.CODIGO = 6281145 THEN 'controladoria4@trescoqueiros.com'
-            WHEN PS.CODIGO = 6808  THEN 'controladoria4@trescoqueiros.com'
-            WHEN PS.CODIGO = 10229 THEN 'controladoria4@trescoqueiros.com'
-       END                                       EMAIL
-       
-FROM   titulos TL
+SELECT
+    TL.numeroboleto                            NUMERO_TITULO,
+    ps.codigo                                  ID_PESSOA,
+    PS.NOME                                    FORNECEDOR,
+    RTRIM(T2.DESCRICAO)                        FORMA_PAGAMENTO,
+    TD.DESCRICAO                               TIPO_DOC,
+    CONVERT(VARCHAR(10), TL.emissao, 103)      DT_EMISSAO,
+    CONVERT(VARCHAR(10), TL.primvcto, 103)     PRIM_DT_VCTO,
+    CONVERT(VARCHAR(10), TL.datavcto, 103)     DT_VCTO,
+    CASE
+        WHEN TL.saldo = 0 THEN CONVERT(VARCHAR(10), TL.ultpgto, 103)
+    END                                        DT_PAGTO,
+    CONVERT(VARCHAR(10), ISNULL(TL.datafaixa1, TL.datafaixa2), 103) DT_LIBERACAO,
+    TL.valor                                   VALOR_TITULO,
+    TL.saldo                                   SALDO_PEDENTE,
+    T1.MASCARA                                 MOEDA,
+    CASE T1.MASCARA
+        WHEN 'BRL' THEN 'R$ ' + CONVERT(VARCHAR, CAST(TL.valor2 AS MONEY), 1)
+        ELSE CONVERT(VARCHAR(50), TL.valor2)
+    END                                        VALOR_ORIGINAL,
+    TL.saldo2                                  SALDO_ORIGINAL,
+    CASE 
+        WHEN ps.CODIGO = 6281145 THEN 'controladoria2@trescoqueiros.com'
+        WHEN PS.CODIGO = 6808  THEN 'controladoria4@trescoqueiros.com'
+        WHEN PS.CODIGO = 10229 THEN 'controladoria4@trescoqueiros.com'
+    END                                       EMAIL
 
+FROM   titulos TL
        INNER JOIN documentos DC
                ON TL.seqdoc = DC.sequencial
        INNER JOIN tiposdoc TD
                ON TD.codigo = DC.tipodoc
        INNER JOIN PESSOAS PS
-                ON PS.CODIGO = DC.representante
+               ON PS.CODIGO = DC.representante
        INNER JOIN TABELAS T1
-                ON T1.CODIGO = TL.moeda2
-                   AND T1.TIPO = 10
+               ON T1.CODIGO = TL.moeda2
+                  AND T1.TIPO = 10
        INNER JOIN TABELAS T2
-                ON T2.Codigo = TL.FORMAPAGTO
-                   AND T2.Tipo = 218
+               ON T2.Codigo = TL.FORMAPAGTO
+                  AND T2.Tipo = 218
 WHERE  1 = 1
        AND ISNULL(DC.SituacaoEF, 'N') <> 'S'
        --AND (CASE WHEN TL.saldo = 0 THEN TL.ultpgto END ) =  CAST( DATEADD( DAY , -1,SYSDATETIME()) AS DATE ) -- 
@@ -102,6 +103,7 @@ WHERE  1 = 1
                              )
        AND TL.FORMAPAGTO NOT IN (8)
        AND ps.codigo  IN (6808,10229,3670)
+       
        
 ORDER  BY DC.emissao DESC
 '''
@@ -120,16 +122,15 @@ try:
     # Preencher o dicionário com os dados obtidos
     for row in rows:
         # Verificar se o e-mail está diretamente especificado na consulta SQL
-        fornecedor_email = row.EMAIL.strip() if hasattr(row, 'EMAIL') and row.EMAIL else None
+        fornecedor_email = row.EMAIL.strip() if hasattr(row, 'EMAIL') and row.EMAIL else DEFAULT_EMAIL
         
-        # Se o e-mail não estiver diretamente especificado, usar o e-mail padrão definido no .env
-        if not fornecedor_email:
-            fornecedor_email = DEFAULT_EMAIL
-
         if fornecedor_email:
             if fornecedor_email not in fornecedores_email:
                 fornecedores_email[fornecedor_email] = []
             fornecedores_email[fornecedor_email].append(row)
+    
+    # Definir o local para português do Brasil para formatação de moeda
+    locale.setlocale(locale.LC_ALL, 'pt_BR.UTF-8')
 
     # Verificar se há resultados
     if len(fornecedores_email) > 0:
@@ -141,36 +142,29 @@ try:
                     <tr>
                         <th>Número do Título</th>
                         <th>Fornecedor</th>
-                        <th>Tipo de Documento</th>
-                        <th>Data de Emissão</th>
                         <th>Data de Vencimento</th>
                         <th>Data de Pagamento</th>
-                        <th>Data de Liberação</th>
                         <th>Valor</th>
-                        <th>Saldo Pendente</th>
-                        <th>Moeda</th>
-                        <th>Valor Original</th>
-                        <th>Saldo Original</th>
+                        <th>Forma de Pagamento</th>
                     </tr>
                 </thead>
                 <tbody>
             """
 
             for row in info_pagamentos:
+                # Formatar os valores em reais usando locale
+                valor_titulo = locale.currency(row.VALOR_TITULO, grouping=True, symbol=True)
+                saldo_pendente = locale.currency(row.SALDO_PEDENTE, grouping=True, symbol=True)
+                valor_original = row.VALOR_ORIGINAL if row.MOEDA != 'R$' else locale.currency(row.VALOR_ORIGINAL, grouping=True, symbol=True)
+                saldo_original = locale.currency(row.SALDO_ORIGINAL, grouping=True, symbol=True)
                 tabela_html += f"""
                     <tr>
-                        <td>{row.NUMERO_TITULO}</td>
+                       <td>{row.NUMERO_TITULO}</td>
                         <td>{row.FORNECEDOR}</td>
-                        <td>{row.TIPO_DOC}</td>
-                        <td>{row.DT_EMISSAO}</td>
                         <td>{row.DT_VCTO}</td>
                         <td>{row.DT_PAGTO if row.DT_PAGTO is not None else 'Não Pago'}</td>
-                        <td>{row.DT_LIBERACAO}</td>
-                        <td>{row.VALOR_TITULO}</td>
-                        <td>{row.SALDO_PEDENTE}</td>
-                        <td>{row.MOEDA}</td>
-                        <td>{row.VALOR_ORIGINAL}</td>
-                        <td>{row.SALDO_ORIGINAL}</td>
+                        <td>{valor_titulo}</td>
+                        <td>{row.FORMA_PAGAMENTO}</td>
                     </tr>
                 """
 
@@ -180,7 +174,8 @@ try:
             """
 
             # Corpo do e-mail com a tabela de resultados para este fornecedor
-            mensagem_html = f"""<!DOCTYPE html>
+            mensagem_html = f""" . 
+            <!DOCTYPE html> 
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
@@ -189,20 +184,23 @@ try:
         body {{
             font-family: Arial, sans-serif;
             background-color: #f3f3f3;
-            margin: 20px 0;
+            color:#f3f3f3;
+            margin: 0;
             padding: 0;
         }}
         .container {{
             background-color: white;
             max-width: 90%;
             margin: 20px auto;
-            margin-top: 5% ;
             border: 1px solid #ddd;
             border-radius: 8px;
             overflow: hidden;
+             color:rgb(0,0,0);
         }}
+
         .will {{
-        margin-top: 5% ;
+        margin-top: 5%;
+
         }}
         .header {{
             background-color: rgb(1,85,26);
@@ -251,18 +249,20 @@ try:
 </head>
 <body>
     <div class="container">
-    <div class="will">
         <div class="header">
             <h1>ATUALIZAÇÃO DE PAGAMENTOS</h1>
         </div>
         <div class="content">
+        <div class="Will">
+            <p>Olá {info_pagamentos[0].FORNECEDOR},</p>
+        </div>
             <p>Gostaríamos de informá-lo que os seguintes pagamentos de título foram processados recentemente. Por favor, verifique os detalhes abaixo:</p>
             <div class="table-container">
                 {tabela_html}
             </div>
         </div>
+        <div class="footer">
         </div>
-        <div class="footer"></div>
     </div>
 </body>
 </html>"""
@@ -270,8 +270,11 @@ try:
             # Preparar a lista de endereços CC a partir da variável de ambiente
             cc_addresses = EMAIL_CC.split(',') if EMAIL_CC else None
 
+            # Definir um assunto específico para o e-mail
+            subject = f"PAGAMENTOS PROCESSADOS PARA {info_pagamentos[0].FORNECEDOR} EM {info_pagamentos[0].DT_PAGTO}"
+
             # Enviar o e-mail para o fornecedor atual
-            send_email(email_fornecedor, "Pagamentos Processados", mensagem_html, cc_addresses=cc_addresses)
+            send_email(email_fornecedor, subject, mensagem_html, cc_addresses=cc_addresses)
             print(f"Email enviado com os pagamentos processados para {email_fornecedor}.")
 
     else:
